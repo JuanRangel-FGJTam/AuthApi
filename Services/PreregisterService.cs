@@ -87,7 +87,15 @@ namespace AuthApi.Services
 
         }
 
-        public Person? ValidateRegister( Guid preregisterId, ValidateRegisterRequest request){
+        /// <summary>
+        /// Validate the preregister token and create a recod of the person
+        /// </summary>
+        /// <param name="preregisterId"></param>
+        /// <param name="request"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception> 
+        /// <exception cref="ValidationException"></exception> 
+        public Person ValidateRegister( Guid preregisterId, ValidateRegisterRequest request){
             
             // Retrive validation enity
             var preregister = this.dbContext.Preregistrations.Find(preregisterId)
@@ -113,12 +121,12 @@ namespace AuthApi.Services
             };
 
 
-            // Create person record
+            // * Create person record
             var newPerson = personService.StorePerson(newPersonRequest, preregister.Id, DateTime.Now)
               ?? throw new Exception("Excepcion no controlada, la respuesta al registrar la persona es nula");
 
 
-            // send welcome mail
+            // * send welcome mail
             try {
                 var taskEmail = this.SendWelcomeMail(newPerson);
                 taskEmail.Wait();
@@ -128,7 +136,7 @@ namespace AuthApi.Services
             }
 
 
-            // Delete the pre-register record
+            // * Delete the pre-register record
             try{
                 this.dbContext.Preregistrations.Remove( preregister);
                 dbContext.SaveChanges();

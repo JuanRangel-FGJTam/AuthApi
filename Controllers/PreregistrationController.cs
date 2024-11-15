@@ -2,15 +2,17 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using System.ComponentModel.DataAnnotations;
+using System.Net.Mime;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Authorization;
 using AuthApi.Models;
 using AuthApi.Entities;
 using AuthApi.Data;
-using AuthApi.Helper;
-using Microsoft.AspNetCore.Authorization;
 using AuthApi.Services;
 using AuthApi.Data.Exceptions;
-using System.ComponentModel.DataAnnotations;
+using AuthApi.Models.Responses;
+using AuthApi.Validators.Preregistration;
 
 namespace AuthApi.Controllers
 {
@@ -26,37 +28,44 @@ namespace AuthApi.Controllers
         private readonly SessionService sessionService = sessionService;
         private readonly ILogger<PreregistrationController> logger = logger;
 
-
         /// <summary>
         /// Pre register the user and send a email to verify his information
         /// </summary>
         /// <response code="201">Succsessfull create the pre-register record</response>
-        /// <response code="400">The request is not valid ore some error are present</response>
-        /// <response code="422">Some request params are not valid</response>
+        /// <response code="409">The request is not valid ore some error are present</response>
+        /// <response code="422">The request params are not valid</response>
         [HttpPost]
-        public async Task<IActionResult> RegisterUser( PreregistrationRequest request )
+        [Consumes(MediaTypeNames.Application.Json)]
+        [Produces(MediaTypeNames.Application.Json)]
+        [ProducesResponseType(typeof(PreRegisterUserResponse), StatusCodes.Status201Created)]
+        [ProducesResponseType(typeof(ConflictResponse), StatusCodes.Status409Conflict)]
+        [ProducesResponseType(typeof(UnprocesableResponse), StatusCodes.Status422UnprocessableEntity)]
+        public async Task<IActionResult> RegisterUser(PreregistrationRequest request)
         {
-            // Validate request
-            if (!ModelState.IsValid)
-            {
-                return UnprocessableEntity( ModelState );
+
+            // * Validate request
+            var validator = new NewRegisterValidator();
+            var validationResults = validator.Validate(request);
+            if (!validationResults.IsValid) {
+                return UnprocessableEntity( new UnprocesableResponse(validationResults.Errors));
             }
-    
-            // Create the pre-register record
+
+            // * Create the pre-register record
             try{
                 var _preRegisterId = await this.preregisterService.CreatePreregister(request);
-                return Created("", new {
-                    Id = _preRegisterId
+                return Created( "", new PreRegisterUserResponse {
+                    Id = _preRegisterId!,
+                    Email = request.Mail
                 });
             }catch(SimpleValidationException ve){
-                return UnprocessableEntity( new {
-                    errors = ve.ValidationErrors.ToDictionary()
-                } );
+                return UnprocessableEntity(
+                    new UnprocesableResponse( ve.ValidationErrors.ToDictionary() )
+                );
             }catch(Exception err){
                 logger.LogError(err, "Error at trying to generate a new preregistration record; {message}", err.Message );
-                return BadRequest( new {
+                return Conflict( new ConflictResponse {
                     Title = "Error no controlado al generar la solicitud.",
-                    err.Message
+                    Message = err.Message
                 });
             }
         }
@@ -87,67 +96,65 @@ namespace AuthApi.Controllers
         ///       "appName" : string
         ///     }
         /// 
-        /// Sample response:
-        /// 
-        ///     {
-        ///       "personId": string,
-        ///       "fullName": string
-        ///       "sessionToken": string
-        ///     }
-        /// 
         /// </remarks>
         /// <param name="request"></param>
         /// <response code="201">Succsessfull stored the person</response>
-        /// <response code="400">The request is not valid or are parameters missing</response>
         /// <response code="404">The preregister record was not found by matching the token passed by the request</response>
         /// <response code="422">Some request params are not valid</response>
-        [Route("validate")]
-        [HttpPost]
-        public IActionResult ValidateRegister([FromBody] ValidateRegisterRequest request){
+        /// <response code="409">Internal error</response>
+        [HttpPost("validate")]
+        [Consumes(MediaTypeNames.Application.Json)]
+        [Produces(MediaTypeNames.Application.Json)]
+        [ProducesResponseType(typeof(ValidateRegisterResponse), StatusCodes.Status201Created)]
+        [ProducesResponseType(typeof(NotFoundResponse), StatusCodes.Status404NotFound)]
+        [ProducesResponseType(typeof(UnprocesableResponse), StatusCodes.Status422UnprocessableEntity)]
+        [ProducesResponseType(typeof(ConflictResponse), StatusCodes.Status409Conflict)]
+        public IActionResult ValidateRegister(ValidateRegisterRequest request){
+
+            // * Validate the request
+            var validationResults = new ValidateRegistrationValidator().Validate(request);
+            if(!validationResults.IsValid){
+                return UnprocessableEntity( new UnprocesableResponse(validationResults.Errors));
+            }
+
             try {
 
-                // * Validate token 
-                var preregister =  this.preregisterService.GetPreregistrationByToken(request.Token!);
+                // * Validate token
+                var preregister = this.preregisterService.GetPreregistrationByToken(request.Token!);
                 if( preregister == null){
-                    return NotFound( new {
+                    return NotFound( new NotFoundResponse {
                         Title = "El código de prerregistro no es válido.",
                         Message = $"No se encontró registro que corresponda al código '{request.Token!}'."
                     });
                 }
 
-                // * Store the person data 
-                var newPerson = this.preregisterService.ValidateRegister( preregister.Id, request );
-                if( newPerson == null){
-                    return BadRequest( new {
-                        Title = "No se puede registrar la persona.",
-                        Message = "No se puede registrar la persona, el registro no se encuentra."
-                    });
-                }
+                // * Store the person data
+                Person newPerson = this.preregisterService.ValidateRegister( preregister.Id, request );
 
-                // * Create a session 
+                // * Create a session
                 string ipAddress = HttpContext.Connection.RemoteIpAddress!.ToString();
                 string userAgent = Request.Headers["User-Agent"].ToString();
                 var sessionToken = sessionService.StartPersonSession( newPerson, ipAddress, userAgent );
 
                 // * Return the data
-                return Created("", new {
-                    personId = newPerson.Id.ToString(),
-                    fullName = newPerson.FullName,
-                    sessionToken
+                return Created("", new ValidateRegisterResponse {
+                    PersonId = newPerson.Id.ToString(),
+                    FullName = newPerson.FullName,
+                    SessionToken = sessionToken
                 });
 
             }
-            catch( ValidationException ve){
-                var errorsData = (Dictionary<string, object>) ve.Value!;
-                return UnprocessableEntity(new {
-                    Title = "Uno o mas campos tienen error.",
-                    Errors = errorsData
-                });
+            catch(ValidationException ve){
+                var errorsData = (Dictionary<string, string>) ve.Value!;
+                return UnprocessableEntity(
+                    new UnprocesableResponse(errorsData)
+                );
             }
-            catch (System.Exception err) {
-                return BadRequest( new {
+            catch (Exception err) {
+                logger.LogError(err, "Error at validate the registration code.");
+                return Conflict( new ConflictResponse {
                     Title = "Error no controlado al validar el registro.",
-                    err.Message
+                    Message = err.Message
                 });
             }
         }
@@ -161,33 +168,37 @@ namespace AuthApi.Controllers
         /// <returns code="409">Error at attempting to send the mail to the server</returns>
         [Authorize]
         [HttpPost("send/mail/welcome/to/{email}")]
+        [Produces(MediaTypeNames.Application.Json)]
+        [ProducesResponseType(typeof(SendWelcomeMailResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(NotFoundResponse), StatusCodes.Status404NotFound)]
+        [ProducesResponseType(typeof(ConflictResponse), StatusCodes.Status409Conflict)]
         public IActionResult SendWelcomeMail([FromRoute] string email)
         {
             // * attempt to find the person
             Person? person = dbContext.People.Where(item => item.Email == email).FirstOrDefault();
             if(person == null){
-                return NotFound(new {
-                    Title = "Email not found"
+                return NotFound( new NotFoundResponse {
+                    Title = "El correo no se encuentra registrado en el sistema.",
+                    Message = $"No se encontró persona asociada con el correo '{email}', revisé e intenté de nuevo."
                 });
             }
 
             // * send the email
             try {
-
                 var sendEmailTask = preregisterService.SendWelcomeMail(person);
                 sendEmailTask.Wait();
 
                 // return the response
-                return Ok( new {
+                return Ok( new SendWelcomeMailResponse {
                     Email = email,
                     EmailResponse = sendEmailTask.Result
                 });
 
             }catch(Exception ex){
-                return Conflict( new {
-                    Title = "Error al enviar el mensage",
-                    Message = ex.Message
-                });
+                logger.LogError(ex, "Error at send the welcome mail");
+                return Conflict(
+                    new ConflictResponse("Error al enviar el mensage", ex)
+                );
             }
             
         }
