@@ -2,25 +2,22 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Net.Mime;
+using System.ComponentModel.DataAnnotations;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.IdentityModel.Tokens;
+using Microsoft.Extensions.Options;
 using AuthApi.Data;
 using AuthApi.Entities;
 using AuthApi.Models;
 using AuthApi.Helper;
-using Microsoft.AspNetCore.Authorization;
-using System.Net.Http.Headers;
 using AuthApi.Services;
-using System.Runtime.Serialization;
-using System.ComponentModel.DataAnnotations;
-using Microsoft.EntityFrameworkCore.Metadata.Internal;
-using Microsoft.IdentityModel.Tokens;
-using System.Net.NetworkInformation;
-using Microsoft.AspNetCore.Http.HttpResults;
-using Microsoft.AspNetCore.Components.Web;
-using Microsoft.Extensions.Options;
-using System.Diagnostics;
-using System.Security.Claims;
+using AuthApi.Models.Responses;
+using AuthApi.Models.Responses.People;
+using AuthApi.Validators.People;
+
 
 namespace AuthApi.Controllers
 {
@@ -47,13 +44,15 @@ namespace AuthApi.Controllers
         /// <remarks> This endpoint returns all people stored.</remarks>
         /// <response code="200">Returns the person created</response>
         [HttpGet]
-        public ActionResult<IEnumerable<PersonResponse>?> GetAllPeople( [FromQuery] int chunk = 100, [FromQuery] int skip = 0 )
+        [Consumes(MediaTypeNames.Application.Json)]
+        [Produces(MediaTypeNames.Application.Json)]
+        public ActionResult<IEnumerable<PersonResponse>?> GetAllPeople([FromQuery] int take = 10, [FromQuery] int offset = 0)
         {
             var peopleQuery = this.personService.GetPeople();
 
             var dataPeople = peopleQuery.OrderBy(p => p.CreatedAt)
-                .Skip(skip)
-                .Take(chunk)
+                .Skip(offset)
+                .Take(take)
                 .ToArray();
 
             // * Return response
@@ -100,41 +99,37 @@ namespace AuthApi.Controllers
         /// </remarks>
         /// <param name="personRequest"></param>
         /// <response code="201">Succsessfull stored the person</response>
-        /// <response code="400">The request is not valid</response>
-        /// <response code="401">Auth token is not valid or is not present</response>
+        /// <response code="422">The request params are not valid or are missing</response>
+        /// <response code="409">Error at attempting to create the person</response>
         [HttpPost]
-        public IActionResult StorePerson( PersonRequest personRequest )
+        [Consumes(MediaTypeNames.Application.Json)]
+        [Produces(MediaTypeNames.Application.Json)]
+        [ProducesResponseType(typeof(Person), StatusCodes.Status201Created)]
+        [ProducesResponseType(typeof(ConflictResponse), StatusCodes.Status409Conflict)]
+        [ProducesResponseType(typeof(UnprocesableResponse), StatusCodes.Status422UnprocessableEntity)]
+        public IActionResult StorePerson(PersonRequest personRequest)
         {
-
             // * Validate request
-            if (!ModelState.IsValid)
+            var validationResults = new NewPeopleValidator().Validate(personRequest);
+            if(!validationResults.IsValid)
             {
-                return BadRequest( ModelState );
+                return UnprocessableEntity( new UnprocesableResponse(validationResults.Errors));
             }
 
             try
             {
                 var person = this.personService.StorePerson(personRequest);
-                return Created("Person created", person );
-                
+                return Created("Person created", person);
             }
             catch (ValidationException ve)
             {
-                var errorsData = (Dictionary<string, object>) ve.Value!;
-                return UnprocessableEntity(new {
-                    Title = "One or more field had errors",
-                    Errors = errorsData
-                });
+                var errorsData = (Dictionary<string, string>) ve.Value!;
+                return UnprocessableEntity(new UnprocesableResponse(errorsData));
             }
-            catch (System.Exception ex)
+            catch (Exception ex)
             {
-                return BadRequest(new {
-                    Title = "Unhandle exception",
-                    Message = ex.Message,
-                    Errors = Array.Empty<string>()
-                });
+                return Conflict( new ConflictResponse("Error al crear la persona", ex));
             }
-            
         }
 
         
@@ -148,36 +143,46 @@ namespace AuthApi.Controllers
         /// <param name="personID"></param>
         /// <param name="personRequest"></param>
         /// <returns></returns>
-        /// <response code="201">The person is updated</response>
+        /// <response code="200">The person is updated</response>
         /// <response code="400">The request is not valid</response>
         /// <response code="401">Auth token is not valid or is not present</response>
-        /// <response code="409">Fail to to update the user password</response>/// 
+        /// <response code="404">Person not found on the system</response>
+        /// <response code="409">Fail to to update the user password</response>
+        /// <response code="422">Some request parameters are not valid or missing</response>
         [HttpPatch]
         [Route ("{personID}")]
-        public IActionResult UpdatePerson( string personID, [FromBody] UpdatePersonRequest personRequest  )
+        [Consumes(MediaTypeNames.Application.Json)]
+        [Produces(MediaTypeNames.Application.Json)]
+        [ProducesResponseType(typeof(BadrequestResponse), StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(typeof(NotFoundResponse), StatusCodes.Status404NotFound)]
+        [ProducesResponseType(typeof(ConflictResponse), StatusCodes.Status409Conflict)]
+        [ProducesResponseType(typeof(UnprocesableResponse), StatusCodes.Status422UnprocessableEntity)]
+        public IActionResult UpdatePerson([FromRoute] string personID, [FromBody] UpdatePersonRequest personRequest )
         {
             // Validate ID
             Guid _personID = Guid.Empty;
-            try{
+            try {
                 _personID = Guid.Parse( personID );
             }catch(Exception){
-                return BadRequest( new {
-                    message = $"Person id format not valid"
+                return BadRequest( new BadrequestResponse {
+                    Title = "El formato del ID es incorrecto",
+                    Message = "El formato del ID es incorrecto"
                 });
             }
 
             // * Get relations and validate
-            var errorsRelations = new Dictionary<string, object>();
+            var errorsRelations = new Dictionary<string, string>();
 
-            // validate person id
+            // * validate personID
             Person? person = this.dbContext.People.Find( _personID );
             if( person == null){
-                return BadRequest(new {
-                    message = $"Person id {personID} not found"
+                return NotFound( new NotFoundResponse {
+                    Title = "La persona no se encuentra registrada en el sistema",
+                    Message = $"No se encontró registro de la persona con ID '{personID}'."
                 });
             }
             
-            // Update information
+            // * Update information
             if(personRequest.Name != null )
             {
                 person.Name = personRequest.Name;
@@ -195,28 +200,25 @@ namespace AuthApi.Controllers
 
             if(personRequest.Rfc != null )
             {
-                var rfcStored =  dbContext.People.Where( p => p.DeletedAt == null && p.Rfc == personRequest.Rfc && p.Id != _personID ).Count();
+                var rfcStored = dbContext.People.Where( p => p.DeletedAt == null && p.Rfc == personRequest.Rfc && p.Id != _personID ).Count();
                 if(rfcStored > 0){
-                    errorsRelations.Add( "rfc", new string[]{ "El RFC ingresado ya está registrado en nuestro sistema."} );
+                    errorsRelations.Add("rfc", "El RFC ingresado ya está registrado en nuestro sistema.");
                 }
                 person.Rfc = personRequest.Rfc;
             }
 
             if(personRequest.Curp != null )
             {
-                var curpStored =  dbContext.People.Where( p => p.DeletedAt == null && p.Curp == personRequest.Curp && p.Id != _personID ).Count();
+                var curpStored = dbContext.People.Where( p => p.DeletedAt == null && p.Curp == personRequest.Curp && p.Id != _personID ).Count();
                 if(curpStored > 0){
-                    errorsRelations.Add( "curp", new string[]{ "El CURP ingresado ya está registrado en nuestro sistema."} );
+                    errorsRelations.Add("curp", "El CURP ingresado ya está registrado en nuestro sistema.");
                 }
                 person.Curp = personRequest.Curp;
             }
 
             if( errorsRelations.Values.Count > 0)
             {
-                return BadRequest(new {
-                    Title = "One or more relations are not found",
-                    Errors = errorsRelations
-                });
+                return UnprocessableEntity( new UnprocesableResponse (errorsRelations) );
             }
 
             if(personRequest.Birthdate != null )
@@ -256,18 +258,15 @@ namespace AuthApi.Controllers
             if( !string.IsNullOrEmpty(personRequest.Password) && personRequest.Password == personRequest.ConfirmPassword ){
 
                 if(string.IsNullOrEmpty( personRequest.OldPassword)){
-                    return UnprocessableEntity( new {
-                        Title = "One or more field had errors",
-                        Errors = new {
-                            oldPassword = "El campo es requerido para actualizar la contraseña."
-                        }
+                    return UnprocessableEntity( new UnprocesableResponse {
+                        Errors = new Dictionary<string,string> {{ "oldPassword", "El campo es requerido para actualizar la contraseña." }}
                     });
                 }
 
                 // * verify the old password
                 var hashedPassword = this.cryptographyService.HashData(personRequest.OldPassword??"");
                 if( person.Password != hashedPassword ){
-                    return Conflict(new {
+                    return Conflict( new ConflictResponse {
                         Title = "Error al actualizar la contraseña",
                         Message = "La contraseña anterior no coincide con la almacenada en la base de datos."
                     });
@@ -278,7 +277,7 @@ namespace AuthApi.Controllers
                 }
                 catch (System.Exception ex) {
                     this._logger.LogError(ex, "Fail to update the user password");
-                    return Conflict(new {
+                    return Conflict(new ConflictResponse {
                         Title = "Error al actualizar la contraseña",
                         Message = ex.Message
                     });
@@ -286,7 +285,7 @@ namespace AuthApi.Controllers
             }
 
             return Ok( new {
-                message = $"Person {personID} updated"
+                Message = $"Person {personID} updated"
             });
         }
 
@@ -311,20 +310,26 @@ namespace AuthApi.Controllers
         /// <param name="email"></param>
         /// <param name="hiddenName"></param>
         /// <response code="200">Return the person related with the email</response>
+        /// <response code="401">Auth token is not valid or is not present</response>
         /// <response code="404">There is no person with the email searched</response>
         [HttpGet]
-        [Route("search")]
+        [Route("/api/people-search")]
+        [Consumes(MediaTypeNames.Application.Json)]
+        [Produces(MediaTypeNames.Application.Json)]
+        [ProducesResponseType(typeof(PeopleSearchPerson), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(NotFoundResponse), StatusCodes.Status404NotFound)]
         public IActionResult SearchPerson( [FromQuery] string email, [FromQuery] int hiddenName ){
-            var people =  this.personService.Search( email, null,null, PersonService.SearchMode.Equals );
+            var people = this.personService.Search( email, null,null, PersonService.SearchMode.Equals );
 
             var person = people.FirstOrDefault();
             if( person == null){
-                return NotFound( new {
-                    Message = "Person not found"
+                return NotFound( new NotFoundResponse {
+                    Title = "La persona no se encuentra registrada",
+                    Message = $"No se encontró el registro de la persona con el correo '{email}'"
                 });
             }
 
-            return Ok( new {
+            return Ok( new PeopleSearchPerson {
                 Id = person.Id,
                 FullName = hiddenName == 1 ?HiddenText.Hidden(person.FullName) :person.FullName,
                 Birthdate = person.Birthdate.ToString("yyyy-MM-dd"),
@@ -350,26 +355,34 @@ namespace AuthApi.Controllers
 
 
         /// <summary>
-        ///  Retrive the data of the person 
+        ///  Retrive the data of the person
         /// </summary>
         /// <param name="personID"></param>
         /// <response code="200">Return the person data</response>
         /// <response code="400">The request is not valid</response>
+        /// <response code="404">The person was not found on the system</response>
         /// <response code="401">Auth token is not valid or is not present</response>
         [HttpGet]
         [Route ("{personID}")]
+        [Consumes(MediaTypeNames.Application.Json)]
+        [Produces(MediaTypeNames.Application.Json)]
+        [ProducesResponseType(typeof(PeopleSearchPerson), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(BadrequestResponse), StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(typeof(NotFoundResponse), StatusCodes.Status404NotFound)]
         public ActionResult<PersonResponse> GetPerson( string personID )
         {
-            // Validate ID
+            // Validate the personID
             Guid _personID = Guid.Empty;
-            try{
+            try {
                 _personID = Guid.Parse( personID );
             }catch(Exception){
-                return BadRequest( new {
-                    Message = $"Person id format not valid"
+                return BadRequest( new BadrequestResponse {
+                    Title = "El formato del ID es incorrecto",
+                    Message = "El formato del ID es incorrecto"
                 });
             }
 
+            // * retrive the person data
             var person = this.personService.GetPeople()
                 .Include(p => p.Addresses.Where( a=> a != null && a.DeletedAt == null ) )
                 .Include(p => p.ContactInformations.Where( a => a != null && a.DeletedAt == null))
@@ -377,8 +390,9 @@ namespace AuthApi.Controllers
 
             if ( person == null)
             {
-                return NotFound( new {
-                    Message = "Person not found"
+                return NotFound( new NotFoundResponse {
+                    Title = "La pesona no se encuentra registrada en el sistema",
+                    Message = $"La pesona con ID '{_personID}' no se encuentra registrada en el sistema."
                 });
             }
             
@@ -389,43 +403,32 @@ namespace AuthApi.Controllers
         /// Validate the person email and password
         /// </summary>
         /// <remarks>
-        /// 
-        /// Sample of succsess returned data:
-        /// 
-        ///     Httpcode 200
-        ///     {
-        ///       "Id": string,
-        ///       "FullName": string,
-        ///       "Email": string
-        ///     }
-        ///     
-        /// 
-        /// Sample of fail the request:
-        /// 
-        ///     Httpcode 401|404:
-        ///     {
-        ///       "Message": string
-        ///     }
-        ///     
         /// </remarks>
         /// <param name="authenticateRequest"></param>
         /// <returns></returns>
         /// <response code="200">Return the person data of the email </response>
-        /// <response code="400">The email or password are not present in the request</response>
-        /// <response code="401">The email or the password are incorrect</response>
+        /// <response code="401">User credentials are not valid</response>
         /// <response code="404">The email was not found on the database</response>
+        /// <response code="422">Some parameter are invalid or missing</response>
         [HttpPost]
         [Route("auth")]
+        [Consumes(MediaTypeNames.Application.Json)]
+        [Produces(MediaTypeNames.Application.Json)]
+        [ProducesResponseType(typeof(AuthPersonResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(NotFoundResponse), StatusCodes.Status404NotFound)]
+        [ProducesResponseType(typeof(UnprocesableResponse), StatusCodes.Status422UnprocessableEntity)]
         public ActionResult AuthPerson([FromBody] AuthenticateRequest authenticateRequest){
 
-            if( !ModelState.IsValid){
-                return BadRequest(ModelState);
+            var validationResults = new AuthPersonValidator().Validate(authenticateRequest);
+            if(!validationResults.IsValid){
+                return UnprocessableEntity( new UnprocesableResponse(validationResults.Errors));
             }
 
             var _persons = this.personService.Search( authenticateRequest.Email!, null, null );
             if( _persons.IsNullOrEmpty()){
-                return NotFound(new {
-                    Message = "El correo no se encuentra registrado en la base de datos"
+                return NotFound(new NotFoundResponse {
+                    Title = "El correo no se encuentra registrado en la base de datos",
+                    Message = $"El correo '{authenticateRequest.Email}' no se encuentra registrado en la base de datos"
                 });
             }
 
@@ -436,10 +439,10 @@ namespace AuthApi.Controllers
                 });
             }
 
-            return Ok(new{
+            return Ok(new AuthPersonResponse {
                 Id = person.Id,
                 Name = person.FullName,
-                Email = person.Email
+                Email = person.Email!
             });
 
         }
@@ -829,7 +832,9 @@ namespace AuthApi.Controllers
         public ActionResult<IEnumerable<PersonSearchResponse>> SearchPeople([FromQuery] string? search ){
 
             // * search for the people
+#pragma warning disable CS8604 // Possible null reference argument.
             var peopleRaw = this.personService.Search(search);
+#pragma warning restore CS8604 // Possible null reference argument.
 
             // * process the data
             List<PersonSearchResponse> people = peopleRaw.Select( item => PersonSearchResponse.FromEntity(item)).ToList();
