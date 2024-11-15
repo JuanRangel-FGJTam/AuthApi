@@ -145,7 +145,7 @@ namespace AuthApi.Controllers
 
             }
             catch(ValidationException ve){
-                var errorsData = (Dictionary<string, string>) ve.Value!;
+                var errorsData = (Dictionary<string, object>) ve.Value!;
                 return UnprocessableEntity(
                     new UnprocesableResponse(errorsData)
                 );

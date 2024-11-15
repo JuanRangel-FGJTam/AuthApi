@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 
 namespace AuthApi.Models.Responses {
     public class UnprocesableResponse {
@@ -18,6 +19,25 @@ namespace AuthApi.Models.Responses {
         public UnprocesableResponse(IDictionary<string, string> errors ){
             this.Title = "Uno o mas campos tienen error.";
             this.Errors = errors;
+        }
+
+        public UnprocesableResponse(IDictionary<string, object> errors ){
+            this.Title = "Uno o mas campos tienen error.";
+            this.Errors = errors.ToDictionary( el => el.Key, el => {
+                if (el.Value is Array array)
+                {
+                    return array.GetValue(0)?.ToString() ?? string.Empty;
+                }
+                else if (el.Value is IEnumerable enumerable && !(el.Value is string))
+                {
+                    var firstItem = enumerable.Cast<object>().FirstOrDefault();
+                    return firstItem?.ToString() ?? string.Empty;
+                }
+                else
+                {
+                    return el.Value?.ToString() ?? string.Empty;
+                }
+            })!;
         }
 
         public UnprocesableResponse(List<FluentValidation.Results.ValidationFailure> errors ){
